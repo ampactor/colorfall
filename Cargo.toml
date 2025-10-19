@@ -1,0 +1,20 @@
+[package]
+name = "colorfall"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
+nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git", optional = true }
+array-init = "2.1.0"
+
+[features]
+default = ["vizia"]
+vizia = ["dep:nih_plug_vizia"]
+
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]
+members = ["xtask"]
