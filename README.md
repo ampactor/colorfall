@@ -4,7 +4,7 @@ A creative 5-band "soundgoodizer" and tonal shaping tool for VST3 compatible hos
 
 ## What is it?
 
-ColorFall is a multiband dynamics processor designed for creative tonal shaping. It splits your audio into five frequency bands and applies parallel compression and saturation, followed by a serial dynamic EQ. The core concept is that two simple knobs, `Amount` and `Tilt`, dynamically control dozens of underlying DSP parameters to create complex, evolving sounds.
+ColorFall is a multiband dynamics processor designed for creative tonal shaping. It splits your audio into five frequency bands and applies parallel saturation and compression. This is followed by a unique, *reactive* serial EQ that dynamically boosts frequencies to compensate for the gain reduction applied by the compressors, creating a rich, resonant character. The core concept is that two simple knobs, `Amount` and `Tilt`, dynamically control dozens of underlying DSP parameters to create complex, evolving sounds.
 
 It's designed to be a simple tool for adding character, from subtle warmth and cohesion to aggressive, colorful distortion.
 
@@ -25,4 +25,3 @@ It's designed to be a simple tool for adding character, from subtle warmth and c
     -   **macOS**: `/Library/Audio/Plug-Ins/VST3`
     -   **Linux**: `~/.vst3/`
 4.  Rescan for plugins in your DAW.
-

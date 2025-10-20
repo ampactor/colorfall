@@ -8,8 +8,8 @@ ColorFall is a creative 5-band dynamics processor and tonal shaping tool. The co
 
 ### Core Features (✅ Implemented)
 
-- **Dynamic Multiband Processing**: 5-band crossover split with parallel compression and saturation.
-- **Dynamic Serial EQ**: 5-band serial compensation EQ that shifts with the `Tilt` control.
+- **Dynamic Multiband Processing**: 5-band crossover split with `saturate -> compress` signal flow and independent (dual-mono) L/R dynamics.
+- **Reactive Serial EQ**: 5-band serial compensation EQ that is fully synchronized with the compressor bands and reacts in real-time to the applied gain reduction.
 - **Dynamic Parameters**: All internal DSP parameters (compression, saturation, EQ) are dynamically linked to the `Amount` and `Tilt` knobs.
 - **Loudness Compensation**: RMS-based automatic gain matching between the dry and wet signals is implemented.
 - **Functional GUI**: A Vizia-based user interface with sliders for all main parameters and a gain reduction meter is fully implemented and styled.

@@ -65,7 +65,7 @@ struct ColorFallParams {
 impl Default for ColorFallParams {
     fn default() -> Self {
         Self {
-            amount: FloatParam::new("Amount", 0.1, FloatRange::Linear { min: 0.0, max: 1.0 })
+            amount: FloatParam::new("Amount", 0.4, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Exponential(50.0))
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(1))
@@ -84,7 +84,7 @@ impl Default for ColorFallParams {
             .with_smoother(SmoothingStyle::Exponential(50.0)),
             mix: FloatParam::new(
                 "Mix",
-                0.5, // Default Mix: 50% dry/wet
+                1.0, // Default Mix: 100% wet to showcase the effect immediately
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
             .with_unit("%")
@@ -103,7 +103,8 @@ impl Default for ColorFallParams {
             .with_value_to_string(formatters::v2s_f32_gain_to_db(1))
             .with_smoother(SmoothingStyle::Exponential(50.0)),
             // GUI state
-            #[cfg(feature = "vizia")] editor_state: Self::default_editor_state(),
+            #[cfg(feature = "vizia")]
+            editor_state: Self::default_editor_state(),
         }
     }
 }
@@ -166,149 +167,15 @@ const BASE_CROSSOVER_FREQS: [f32; MAX_BANDS - 1] = [150.0, 800.0, 4000.0, 9000.0
 impl ColorFall {
     /// Updates all dynamically changing parameters based on the main controls.
     /// This is called once per block to set the "base" for the per-sample smoothers.
-    /// It calculates the target crossover frequencies and the target EQ settings for each band
-    /// based on the current 'Amount' and 'Tilt' values.
-    fn update_dynamic_parameters(&mut self, amount: f32, tilt: f32) {
-        for (i, band) in self.bands.iter_mut().enumerate() {
-            // --- Tilt Bias Calculation ---
-            // This applies a bias to the intensity of processing for each band based on the 'Tilt' control.
-            // A negative tilt emphasizes processing on the lower bands, while a positive tilt
-            // emphasizes the higher bands. The mid-band (i=2) is unaffected.
-            let band_tilt_factor = match i {
-                0..=1 => 1.0 + (tilt * -0.6),
-                2 => 1.0,
-                3..=4 => 1.0 + (tilt * 0.6),
-                _ => 1.0,
-            }
-            .clamp(0.4, 1.6);
-            let final_band_intensity = (amount * band_tilt_factor).sqrt(); // Use sqrt for a more responsive curve
-
-            // --- Dynamic EQ Q-Factor and Gain Calculation ---
-            // The 'Amount' knob directly influences the base Q-factor of the compensation EQ.
-            // Higher 'Amount' values lead to a more resonant, "peaky" sound.
-            let q_base = 0.7 + (8.0 * amount); // Q increases more linearly with Amount.
-
-            // The 'Tilt' control also affects the Q-factor. Tilting towards the highs makes the
-            // high-frequency EQs sharper (more resonant) and the low-frequency EQs broader, and vice-versa.
-            // This adds to the "shifting character" of the plugin.
-            let q_tilt_factor = 1.0 + (tilt * (i as f32 - 2.0) * 0.4);
-            let q_factor = (q_base * q_tilt_factor).clamp(0.5, 20.0f32);
-
-            // The gain of the compensation EQ is directly proportional to the band's final intensity.
-            let compensation_gain_db = MAX_COMPENSATION_DB * final_band_intensity;
-
-            // --- Dynamic Frequency Shifting ---
-            // The crossover frequencies are shifted up or down based on the 'Tilt' control.
-            let mut shifted_crossover_freqs = [0.0; MAX_BANDS - 1];
-            for j in 0..(MAX_BANDS - 1) {
-                let shifted_freq = shift_frequency(BASE_CROSSOVER_FREQS[j], tilt);
-                shifted_crossover_freqs[j] = shifted_freq;
-                self.crossovers[j].update_lr_lowpass(self.sample_rate, shifted_freq);
-            }
-
-            // The center frequency for each band's compensation EQ is the geometric mean of its
-            // bounding crossover frequencies. This ensures the EQ always targets the center of the
-            // processed band, even as the crossovers are shifting.
-            let lower_bound = if i == 0 {
-                20.0
-            } else {
-                shifted_crossover_freqs[i - 1]
-            };
-            let upper_bound = if i == MAX_BANDS - 1 {
-                self.sample_rate / 2.0
-            } else {
-                shifted_crossover_freqs[i]
-            };
-            let band_center_freq = (lower_bound * upper_bound).sqrt();
-
-            // Update Compensation EQ coefficients
-            band.compensation_eq.update_peaking(
-                // This now uses the dynamic band_center_freq
-                self.sample_rate,
-                band_center_freq,
-                q_factor,
-                compensation_gain_db,
-            );
+    /// It calculates the target crossover frequencies based on the current 'Tilt' value.
+    fn update_crossover_filters(&mut self, tilt: f32) {
+        // --- Dynamic Frequency Shifting ---
+        // The crossover frequencies are shifted up or down based on the 'Tilt' control. This only
+        // needs to be done once per block for efficiency.
+        for j in 0..(MAX_BANDS - 1) {
+            let shifted_freq = shift_frequency(BASE_CROSSOVER_FREQS[j], tilt);
+            self.crossovers[j].update_lr_lowpass(self.sample_rate, shifted_freq);
         }
-    }
-
-    /// Processes a single stereo sample through the entire multiband chain.
-    /// Returns the processed (wet) sample and the total gain reduction in dB for this sample.
-    fn process_sample(
-        &mut self,
-        sample_l: f32,
-        sample_r: f32,
-        amount: f32,
-        tilt: f32,
-    ) -> (f32, f32, f32) {
-        let mut band_signals_l = [0.0; MAX_BANDS];
-        let mut band_signals_r = [0.0; MAX_BANDS];
-
-        let mut last_lp_l = sample_l;
-        let mut last_lp_r = sample_r;
-        let mut total_gr_db_sample = 0.0;
-
-        // Split into bands using a cascade of Linkwitz-Riley crossover filters.
-        for i in (0..(MAX_BANDS - 1)).rev() {
-            let (lp_l, lp_r) = self.crossovers[i].process(last_lp_l, last_lp_r);
-            band_signals_l[i + 1] = last_lp_l - lp_l; // High-pass is the remainder
-            band_signals_r[i + 1] = last_lp_r - lp_r;
-            last_lp_l = lp_l;
-            last_lp_r = lp_r;
-        }
-        band_signals_l[0] = last_lp_l; // The final low-pass signal is the lowest band
-        band_signals_r[0] = last_lp_r;
-
-        let (mut wet_l, mut wet_r) = (0.0, 0.0);
-
-        // Process each band's dynamics and saturation in parallel.
-        for i in 0..MAX_BANDS {
-            let (mut band_l, mut band_r) = (band_signals_l[i], band_signals_r[i]);
-
-            // 1. Envelope Follower
-            // A simple one-pole low-pass filter on the squared signal (power) acts as an
-            // envelope follower. The attack and release times are calculated dynamically.
-            let band_power = (band_l * band_l + band_r * band_r) * 0.5;
-            let (attack, release) =
-                dsp::calculate_dynamic_time_constants(self.sample_rate, i, amount);
-            let alpha = if band_power > self.bands[i].envelope {
-                1.0 - (-1.0 / attack).exp()
-            } else {
-                1.0 - (-1.0 / release).exp()
-            };
-            self.bands[i].envelope = (1.0 - alpha) * self.bands[i].envelope + alpha * band_power;
-            let envelope_sqrt = self.bands[i].envelope.sqrt();
-
-            // 2. Calculate Target GR
-            // This function computes the desired gain reduction based on the envelope and dynamic parameters.
-            let target_gr = dsp::calculate_target_gr(i, amount, tilt, envelope_sqrt);
-
-            // 3. Apply Smoothed GR
-            // The target GR is smoothed to prevent clicks and artifacts.
-            self.bands[i]
-                .applied_gr_smoother
-                .set_target(self.sample_rate, target_gr);
-            let gr_factor = self.bands[i].applied_gr_smoother.next();
-            total_gr_db_sample += util::gain_to_db(gr_factor);
-
-            band_l *= gr_factor;
-            band_r *= gr_factor;
-
-            // 4. Saturation
-            // A novel cubic saturator adds harmonic content. Its intensity is linked to 'Amount'.
-            band_l = dsp::saturate(band_l, amount);
-            band_r = dsp::saturate(band_r, amount);
-
-            // 5. Sum the processed bands back together
-            wet_l += band_l;
-            wet_r += band_r;
-        }
-        // Denormal Guard: Add a tiny offset to prevent floating point subnormals, which can
-        // cause a massive performance hit on some CPUs.
-        wet_l += 1.0e-20;
-        wet_r += 1.0e-20;
-
-        (wet_l, wet_r, total_gr_db_sample)
     }
 }
 // --- NIH-PLUG IMPLEMENTATION ---
@@ -358,10 +225,12 @@ impl Plugin for ColorFall {
         for band in &mut self.bands {
             band.reset();
         }
+        // Reset smoothers to their neutral state and trackers to a safe, non-zero value.
         self.loudness_correction_smoother.reset(1.0);
         self.gr_meter_smoother.reset(0.0);
-        self.dry_rms_tracker = 0.0;
-        self.wet_rms_tracker = 0.0;
+        // Using a small epsilon prevents division by zero on the first processing block.
+        self.dry_rms_tracker = 1.0e-6;
+        self.wet_rms_tracker = 1.0e-6;
     }
 
     fn process(
@@ -379,11 +248,9 @@ impl Plugin for ColorFall {
         // This is a compromise for efficiency. While per-sample updates would be more accurate for
         // fast automation, it's computationally expensive. This block-based update is sufficient
         // for most use cases and avoids performance issues.
-        self.update_dynamic_parameters(self.params.amount.value(), self.params.tilt.value());
+        self.update_crossover_filters(self.params.tilt.value());
 
-        // --- 2. LOUDNESS CORRECTION CALCULATION ---
-
-        // Calculate a makeup gain factor to match the wet signal's power (from the previous block)
+        // --- 2. LOUDNESS CORRECTION ---        // Calculate a makeup gain factor to match the wet signal's power (from the *previous* block)
         // to the dry signal's power. This introduces a one-block latency to the loudness
         // compensation, but it's a standard, stable, and efficient approach.
         let required_correction = if self.wet_rms_tracker > 1.0e-6 && self.dry_rms_tracker > 1.0e-6
@@ -402,6 +269,9 @@ impl Plugin for ColorFall {
         let mut channels = buffer.iter_samples();
         let mut left = channels.next().unwrap();
         let mut right = channels.next().unwrap();
+        // Store the per-sample GR factors here to pass to the reactive EQ stage.
+        let mut gr_factors_l = [1.0; MAX_BANDS];
+        let mut gr_factors_r = [1.0; MAX_BANDS];
         for (l, r) in left.iter_mut().zip(right.iter_mut()) {
             // Get smoothed parameter values for this sample
             // This is the core of the sample-accurate automation. Each parameter's smoother
@@ -425,21 +295,168 @@ impl Plugin for ColorFall {
             // --- A. Track Dry Signal Power for Loudness Compensation ---
             block_avg_input += (dry_l * dry_l + dry_r * dry_r) * 0.5;
 
-            // --- B. Process one sample through the chain ---
-            // This is the main DSP function, handling multiband splitting, dynamics, and saturation.
-            let (mut wet_l, mut wet_r, sample_gr_db) =
-                self.process_sample(sample_l, sample_r, amount, tilt);
-            total_gr_db += sample_gr_db;
+            // --- B. Parallel Processing Stage ---
+            let (mut wet_l, mut wet_r) = {
+                let mut band_signals_l = [0.0; MAX_BANDS];
+                let mut band_signals_r = [0.0; MAX_BANDS];
+                let mut last_lp_l = sample_l;
+                let mut last_lp_r = sample_r;
+
+                // B.1: Split into 5 bands using the crossover filters
+                for i in (0..(MAX_BANDS - 1)).rev() {
+                    let (lp_l, lp_r) = self.crossovers[i].process(last_lp_l, last_lp_r);
+                    band_signals_l[i + 1] = last_lp_l - lp_l;
+                    band_signals_r[i + 1] = last_lp_r - lp_r;
+                    last_lp_l = lp_l;
+                    last_lp_r = lp_r;
+                }
+                band_signals_l[0] = last_lp_l;
+                band_signals_r[0] = last_lp_r;
+
+                let (mut wet_l, mut wet_r) = (0.0, 0.0);
+                let mut current_sample_gr_db = 0.0;
+
+                // B.2: Process each band independently (Saturation -> Compression)
+                for i in 0..MAX_BANDS {
+                    let (mut band_l, mut band_r) = (band_signals_l[i], band_signals_r[i]);
+
+                    // Saturate first
+                    band_l = dsp::saturate(band_l, amount);
+                    band_r = dsp::saturate(band_r, amount);
+
+                    // Then, compress the saturated signal
+                    let shifted_crossovers: [f32; MAX_BANDS - 1] =
+                        array_init::array_init(|j| shift_frequency(BASE_CROSSOVER_FREQS[j], tilt));
+                    let lower_bound = if i == 0 {
+                        20.0
+                    } else {
+                        shifted_crossovers[i - 1]
+                    };
+                    let upper_bound = if i == MAX_BANDS - 1 {
+                        self.sample_rate / 2.0
+                    } else {
+                        shifted_crossovers[i]
+                    };
+                    let band_center_freq = (lower_bound * upper_bound).sqrt();
+
+                    let (attack, release) = dsp::calculate_dynamic_time_constants(
+                        self.sample_rate,
+                        band_center_freq,
+                        i,
+                        amount,
+                    );
+
+                    // Independent L/R envelope detection
+                    let band_power_l = band_l * band_l;
+                    let alpha_l = if band_power_l > self.bands[i].envelope_l {
+                        1.0 - (-1.0 / attack).exp()
+                    } else {
+                        1.0 - (-1.0 / release).exp()
+                    };
+                    self.bands[i].envelope_l =
+                        (1.0 - alpha_l) * self.bands[i].envelope_l + alpha_l * band_power_l;
+                    let envelope_sqrt_l = self.bands[i].envelope_l.sqrt();
+
+                    let band_power_r = band_r * band_r;
+                    let alpha_r = if band_power_r > self.bands[i].envelope_r {
+                        1.0 - (-1.0 / attack).exp()
+                    } else {
+                        1.0 - (-1.0 / release).exp()
+                    };
+                    self.bands[i].envelope_r =
+                        (1.0 - alpha_r) * self.bands[i].envelope_r + alpha_r * band_power_r;
+                    let envelope_sqrt_r = self.bands[i].envelope_r.sqrt();
+
+                    // Calculate and apply gain reduction
+                    let target_gr_l = dsp::calculate_target_gr(i, amount, tilt, envelope_sqrt_l);
+                    let target_gr_r = dsp::calculate_target_gr(i, amount, tilt, envelope_sqrt_r);
+
+                    self.bands[i]
+                        .applied_gr_smoother_l
+                        .set_target(self.sample_rate, target_gr_l);
+                    self.bands[i]
+                        .applied_gr_smoother_r
+                        .set_target(self.sample_rate, target_gr_r);
+
+                    // Get the GR for this sample and store it for the reactive EQ
+                    gr_factors_l[i] = self.bands[i].applied_gr_smoother_l.next();
+                    gr_factors_r[i] = self.bands[i].applied_gr_smoother_r.next();
+
+                    current_sample_gr_db +=
+                        util::gain_to_db((gr_factors_l[i] + gr_factors_r[i]) / 2.0);
+
+                    band_l *= gr_factors_l[i];
+                    band_r *= gr_factors_r[i];
+
+                    // Sum the processed bands back together
+                    wet_l += band_l;
+                    wet_r += band_r;
+                }
+                total_gr_db += current_sample_gr_db;
+
+                // Denormal guard
+                wet_l += 1.0e-20;
+                wet_r += 1.0e-20;
+
+                (wet_l, wet_r)
+            };
 
             // --- C. Serial Compensation EQ Stage ---
             // After the parallel band processing, the summed wet signal is passed through
             // the series of dynamic EQs.
+
             for i in 0..MAX_BANDS {
+                // --- Reactive EQ Calculation (Per-Sample) ---
+                // We calculate the EQ coefficients for each sample, reacting to the GR of that sample.
+                let tilt_effect = tilt.abs().powf(1.5) * tilt.signum();
+                let band_tilt_factor = match i {
+                    0..=1 => 1.0 + (tilt_effect * -0.6),
+                    2 => 1.0,
+                    3..=4 => 1.0 + (tilt_effect * 0.6),
+                    _ => 1.0,
+                }
+                .clamp(0.4, 1.6);
+
+                let q_base = 0.7 + (8.0 * amount.powf(2.0));
+                let q_tilt_factor = 1.0 + (tilt * (i as f32 - 2.0) * 0.4);
+                let q_factor = (q_base * q_tilt_factor).clamp(0.5, 20.0f32);
+
+                // The EQ gain is a function of the *actual* gain reduction applied in this sample.
+                let avg_gr_factor = (gr_factors_l[i] + gr_factors_r[i]) / 2.0;
+                // We get the GR in dB, normalize it (assuming a max of ~-24dB is where we want max boost),
+                // and then scale it by our max compensation value and other dynamic factors.
+                let gr_db_abs = util::gain_to_db(avg_gr_factor).abs();
+                let compensation_gain_db =
+                    (gr_db_abs / 24.0) * MAX_COMPENSATION_DB * (amount * band_tilt_factor);
+
+                // This calculation must be identical to the one in the parallel stage to ensure sync.
+                let shifted_crossovers: [f32; MAX_BANDS - 1] =
+                    array_init::array_init(|j| shift_frequency(BASE_CROSSOVER_FREQS[j], tilt));
+                let lower_bound = if i == 0 {
+                    20.0
+                } else {
+                    shifted_crossovers[i - 1]
+                };
+                let upper_bound = if i == MAX_BANDS - 1 {
+                    self.sample_rate / 2.0
+                } else {
+                    shifted_crossovers[i]
+                };
+                let band_center_freq = (lower_bound * upper_bound).sqrt();
+
+                self.bands[i].compensation_eq.update_peaking(
+                    self.sample_rate,
+                    band_center_freq,
+                    q_factor,
+                    compensation_gain_db,
+                );
+
                 (wet_l, wet_r) = self.bands[i].compensation_eq.process(wet_l, wet_r);
             }
 
             // --- D. Final Loudness Compensation ---
             wet_l *= loudness_correction;
+
             wet_r *= loudness_correction;
 
             // --- E. Track Wet Signal Power for Loudness Compensation ---
@@ -447,12 +464,10 @@ impl Plugin for ColorFall {
             block_avg_output += wet_power;
 
             // --- F. Constant Power Dry/Wet Mix and Output Gain ---
-            *l = (dry_l * dry_gain) + (wet_l * wet_gain);
-            *r = (dry_r * dry_gain) + (wet_r * wet_gain);
+            *l = ((dry_l * dry_gain) + (wet_l * wet_gain)) * output_gain;
+            *r = ((dry_r * dry_gain) + (wet_r * wet_gain)) * output_gain;
 
             // Apply Master Output Gain
-            *l *= output_gain;
-            *r *= output_gain;
         }
 
         // --- 4. Post-Block RMS Update ---

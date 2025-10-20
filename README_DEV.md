@@ -24,14 +24,15 @@ The plugin's architecture is a hybrid parallel/serial design, executed on a per-
 1.  **Parallel Dynamics (5-Band):**
     -   The incoming stereo signal is split into 5 frequency bands using a cascade of 4th-order Linkwitz-Riley crossover filters.
     -   Each band is processed independently and in parallel:
-        -   An **Envelope Follower** detects the band's level.
+        -   A **Saturator** first adds harmonic content, with its drive linked to the `Amount` parameter.
+        -   A **Dual-Mono Envelope Follower** then detects the level of the saturated signal independently for the Left and Right channels.
         -   A **Gain Computer** calculates the required gain reduction based on the envelope and the dynamic `Amount` and `Tilt` parameters.
-        -   A **Saturator** adds harmonic content, with its drive linked to the `Amount` parameter.
     -   The 5 processed bands are summed back together into a single "wet" signal.
 
-2.  **Serial EQ (5-Band):**
+2.  **Reactive Serial EQ (5-Band):**
     -   The summed wet signal is then passed through a series of 5 cascading peaking EQ filters.
-    -   The gain, Q-factor, and center frequency of these EQs are also dynamically controlled by `Amount` and `Tilt`, creating a resonant character that compensates for and accentuates the dynamics processing.
+    -   The **center frequency** of each EQ is dynamically calculated from the `tilt`-shifted crossover network, ensuring perfect synchronization with the compressor bands.
+    -   The **gain** of each EQ is *reactive*, calculated in real-time based on the actual gain reduction being applied to its corresponding band in the parallel stage. This creates a true "compensation" effect where the EQ boosts what the compressor attenuates.
 
 3.  **Loudness Compensation & Mixing:**
     -   The RMS level of the final wet signal is compared to the RMS of the original dry signal from the *previous* processing block.
@@ -94,6 +95,6 @@ The "sound" of ColorFall comes from the interaction of its dynamic components. W
 
 -   **`saturate()` (`dsp.rs`):** This function implements a cubic waveshaper. The `drive` term controls how hard the signal is pushed, and the final `clamp()` and multiplication control the output clipping and overall wetness of the saturation. Experimenting with different polynomial terms (e.g., adding a `sample.powf(5.0)`) can introduce different harmonic flavors.
 
--   **`update_dynamic_parameters()` (`lib.rs`):** This function controls the "color" part of the plugin—the serial EQs. The `q_base` and `compensation_gain_db` are key variables. Increasing the `q_base` scaling will make the plugin more resonant and "ringy" at high `Amount` settings.
+-   **Reactive EQ Logic (`lib.rs` -> `process` loop):** The logic for the serial EQs is now calculated per-sample inside the main process loop. The `q_base` and `compensation_gain_db` are the key variables. Increasing the `q_base` scaling will make the plugin more resonant and "ringy" at high `Amount` settings. The `compensation_gain_db` is now a function of the real-time gain reduction.
 
 -   **`BASE_CROSSOVER_FREQS` (`lib.rs`):** These constants define the fundamental frequency splits. Adjusting these values will change which parts of the spectrum are processed by which band, significantly altering the overall tonal balance of the effect.

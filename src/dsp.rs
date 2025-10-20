@@ -8,7 +8,6 @@ use nih_plug::prelude::*;
 // --- CORE DSP CONSTANTS ---
 pub const TILT_MAX_SHIFT_SEMITONES: f32 = 4.0;
 pub const MAX_BANDS: usize = 5;
-pub const BAND_CENTER_FREQS: [f32; MAX_BANDS] = [100.0, 400.0, 2500.0, 7000.0, 12000.0];
 pub const MAX_COMPENSATION_DB: f32 = 6.0; // Max Q-Boost gain
 pub const KNEE_MAX_DB: f32 = 8.0; // Max knee width at Amount = 1.0
 
@@ -19,16 +18,20 @@ pub struct ProcessingBand {
     pub compensation_eq: Biquad,
 
     // Envelope and GR states
-    pub envelope: f32,
-    pub applied_gr_smoother: Smoother<f32>,
+    pub envelope_l: f32,
+    pub envelope_r: f32,
+    pub applied_gr_smoother_l: Smoother<f32>,
+    pub applied_gr_smoother_r: Smoother<f32>,
 }
 
 impl Default for ProcessingBand {
     fn default() -> Self {
         Self {
             compensation_eq: Biquad::default(),
-            envelope: 0.0,
-            applied_gr_smoother: Smoother::new(SmoothingStyle::Exponential(1.0)),
+            envelope_l: 0.0,
+            envelope_r: 0.0,
+            applied_gr_smoother_l: Smoother::new(SmoothingStyle::Exponential(1.0)),
+            applied_gr_smoother_r: Smoother::new(SmoothingStyle::Exponential(1.0)),
         }
     }
 }
@@ -37,8 +40,10 @@ impl ProcessingBand {
     /// Resets the state of the processing band.
     pub fn reset(&mut self) {
         self.compensation_eq.reset();
-        self.envelope = 0.0;
-        self.applied_gr_smoother.reset(1.0);
+        self.envelope_l = 0.0;
+        self.envelope_r = 0.0;
+        self.applied_gr_smoother_l.reset(1.0);
+        self.applied_gr_smoother_r.reset(1.0);
     }
 }
 
@@ -167,7 +172,7 @@ impl Biquad {
 pub fn saturate(sample: f32, amount: f32) -> f32 {
     // The 'drive' determines how hard the signal is pushed into the saturator.
     // It scales from a gentle 0.1 to a full 1.0 as `amount` goes from 0 to 1.
-    let drive = amount * 0.9 + 0.1;
+    let drive = amount.powf(1.5) * 0.9 + 0.1;
 
     // This is a cubic waveshaper, a common and computationally cheap way to add
     // odd-order harmonics, characteristic of many analog saturation circuits.
@@ -184,11 +189,13 @@ pub fn calculate_target_gr(band_idx: usize, amount: f32, tilt: f32, envelope: f3
 
     // Tilt Bias: This determines how much the 'Tilt' control affects the processing
     // intensity for this specific band.
+    // A non-linear curve makes the tilt feel more responsive and impactful at the extremes.
+    let tilt_effect = tilt.abs().powf(1.5) * tilt.signum();
     let tilt_bias = match band_idx {
         // More processing on tilted-towards bands
-        0..=1 => 1.0 + (tilt * -0.8), // Bands 1 & 2 (low-mids)
+        0..=1 => 1.0 + (tilt_effect * -0.8), // Bands 1 & 2 (low-mids)
         2 => 1.0,                     // Band 3 (mid)
-        3..=4 => 1.0 + (tilt * 0.8),  // Bands 4 & 5 (high-mids/highs)
+        3..=4 => 1.0 + (tilt_effect * 0.8),  // Bands 4 & 5 (high-mids/highs)
         _ => 1.0,
     }
     .clamp(0.2, 1.8f32);
@@ -245,16 +252,16 @@ pub fn calculate_target_gr(band_idx: usize, amount: f32, tilt: f32, envelope: f3
 /// Calculates dynamic attack/release times in samples based on Amount and Frequency.
 pub fn calculate_dynamic_time_constants(
     sample_rate: f32,
-    band_idx: usize,
+    band_center_freq: f32,
+    _band_idx: usize,
     amount: f32,
 ) -> (f32, f32) {
-    let base_freq = BAND_CENTER_FREQS[band_idx];
-
     // Frequency Scaling: Higher frequencies get faster times
-    let freq_scale = (base_freq / 2000.0).sqrt().clamp(0.5, 2.0);
+    let freq_scale = (band_center_freq / 2000.0).sqrt().clamp(0.5, 2.0);
 
     // Amount Scaling: Higher amount means faster dynamics (more aggressive 'snap')
-    let amount_scale = 1.0 - (amount * 0.8); // 1.0 at 0% amount, 0.2 at 100% amount
+    // A non-linear curve makes the control feel more responsive and musical.
+    let amount_scale = 1.0 - (amount.powf(0.75) * 0.8);
 
     // Base Attack (ms): 1ms (fast) to 20ms (slow)
     let attack_ms = (20.0 * amount_scale) / freq_scale.powf(0.5);
