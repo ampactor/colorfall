@@ -1,18 +1,18 @@
 # ColorFall: Production Roadmap
 
-This document outlines the remaining tasks to get the ColorFall plugin ready for a production release, as well as potential features for future versions.
+This document outlines the remaining tasks to get the ColorFall plugin ready for a production release, as well as potential features for future versions. (we will always use Rust 2024 edition.)
 
 ## Project Status
 
-ColorFall is a creative 5-band dynamics processor and tonal shaping tool. The core DSP engine and GUI are now fully implemented and functional. The project is ready for the final tuning and release phase.
+ColorFall is a creative 5-band dynamics processor and tonal shaping tool. The core DSP engine and GUI are fully implemented, documented, and robust. The project is now in the final tuning and testing phase before its v1.0 release.
 
 ### Core Features (✅ Implemented)
 
 - **Dynamic Multiband Processing**: 5-band crossover split with parallel compression and saturation.
 - **Dynamic Serial EQ**: 5-band serial compensation EQ that shifts with the `Tilt` control.
 - **Dynamic Parameters**: All internal DSP parameters (compression, saturation, EQ) are dynamically linked to the `Amount` and `Tilt` knobs.
-- **Loudness Compensation**: Automatic gain matching between the dry and wet signals is implemented.
-- **Functional GUI**: A Vizia-based user interface with sliders for all main parameters and a gain reduction meter is complete and styled.
+- **Loudness Compensation**: RMS-based automatic gain matching between the dry and wet signals is implemented.
+- **Functional GUI**: A Vizia-based user interface with sliders for all main parameters and a gain reduction meter is fully implemented and styled.
 - **Robust Codebase**: Well-organized and modular code structure (`lib.rs`, `dsp.rs`, `editor.rs`).
 
 ---
@@ -51,6 +51,9 @@ This is the most critical and creative step. The goal is to manually test and tw
 ## 🔮 Future Development (Post-v1.0)
 
 These are ideas for future updates after the initial release.
+- [ ] **Upgrade to LUFS Loudness Compensation**:
+  - **Priority**: High.
+  - **Task**: Replace the current RMS-based loudness compensation with a proper ITU-R BS.1770-compliant LUFS measurement. This will provide more perceptually accurate gain matching.
 
 - [ ] **Implement Oversampling**:
   - **Priority**: High. This is the most important next step for audio quality.

@@ -26,6 +26,8 @@ label {
 knob {
     width: 75px;
     height: 75px;
+    /* Add a subtle shadow to lift the knobs from the background */
+    box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.2);
 }
 
 knob .track {
@@ -39,8 +41,8 @@ knob .track-filled {
 
 /* Styling for the peak meter used for gain reduction */
 peak-meter {
-    width: 20px;
-    height: 1s;
+    width: 25px;
+    height: 1fr; /* Use fractional units to fill available space */
     border-radius: 2px;
     border-width: 1px;
     border-color: #555555;

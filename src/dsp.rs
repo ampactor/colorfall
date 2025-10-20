@@ -1,4 +1,8 @@
-use crate::util;
+//! # Core DSP Module for ColorFall
+//!
+//! This module contains the digital signal processing logic for the ColorFall plugin.
+//! It includes the biquad filter implementation, multiband crossover, dynamic parameter
+//! calculations, and the saturation algorithm.
 use nih_plug::prelude::*;
 
 // --- CORE DSP CONSTANTS ---
@@ -36,10 +40,6 @@ impl ProcessingBand {
         self.envelope = 0.0;
         self.applied_gr_smoother.reset(1.0);
     }
-}
-/// Helper to convert decibels to linear gain.
-pub fn db_to_gain(db: f32) -> f32 {
-    10.0_f32.powf(db / 20.0)
 }
 
 /// Shifts a frequency by a certain number of semitones based on the `tilt` parameter.
@@ -94,7 +94,7 @@ impl BiquadCoefficients {
 
     /// Calculates coefficients for a peaking EQ filter based on the Audio EQ Cookbook.
     pub fn calculate_peaking(sample_rate: f32, freq: f32, q: f32, gain_db: f32) -> Self {
-        let a = db_to_gain(gain_db);
+        let a = util::db_to_gain(gain_db); // Linear gain
         let w0 = 2.0 * std::f32::consts::PI * freq / sample_rate;
         let cos_w0 = w0.cos();
         let sin_w0 = w0.sin();
@@ -108,7 +108,7 @@ impl BiquadCoefficients {
         let a1 = -2.0 * cos_w0;
         let a2 = 1.0 - alpha / a;
 
-        let d = a0;
+        let d = a0 + 1e-9; // Add epsilon to prevent division by zero
         // The resulting coefficients are normalized by 1/D
         Self {
             b0: b0 / d,
@@ -162,15 +162,19 @@ impl Biquad {
     }
 }
 
-/// Novel Saturation: Cubic distortion, intensity linked to Amount.
+/// A novel cubic saturator with soft clipping.
+/// The intensity of the saturation is linked to the `amount` parameter.
 pub fn saturate(sample: f32, amount: f32) -> f32 {
-    // Saturation drive increases with amount.
+    // The 'drive' determines how hard the signal is pushed into the saturator.
+    // It scales from a gentle 0.1 to a full 1.0 as `amount` goes from 0 to 1.
     let drive = amount * 0.9 + 0.1;
 
-    // Cubic approximation (Tanh approximation for a resonant bloom effect)
+    // This is a cubic waveshaper, a common and computationally cheap way to add
+    // odd-order harmonics, characteristic of many analog saturation circuits.
     let out = drive * sample - (drive.powi(2) / 3.0) * sample.powf(3.0);
 
-    // Soft clipping/smoothing on the output
+    // A final soft-clipping stage tames the output, with the clipping becoming
+    // gentler as `amount` increases, to prevent harshness at extreme settings.
     (out * (1.0 - amount * 0.3)).clamp(-1.0, 1.0)
 }
 
@@ -178,7 +182,8 @@ pub fn saturate(sample: f32, amount: f32) -> f32 {
 pub fn calculate_target_gr(band_idx: usize, amount: f32, tilt: f32, envelope: f32) -> f32 {
     // --- 1. Dynamic Parameter Calculation based on Amount and Tilt ---
 
-    // Tilt Bias: Low bands (-ve tilt favors low, +ve tilt de-favors low)
+    // Tilt Bias: This determines how much the 'Tilt' control affects the processing
+    // intensity for this specific band.
     let tilt_bias = match band_idx {
         // More processing on tilted-towards bands
         0..=1 => 1.0 + (tilt * -0.8), // Bands 1 & 2 (low-mids)
@@ -188,7 +193,8 @@ pub fn calculate_target_gr(band_idx: usize, amount: f32, tilt: f32, envelope: f3
     }
     .clamp(0.2, 1.8f32);
 
-    // Band Frequency Factor: Lower frequencies are inherently more powerful, so we apply more compression.
+    // Band Frequency Factor: Lower frequencies often have more energy in typical music,
+    // so we apply a bias to compress them more heavily by default.
     let freq_factor = match band_idx {
         0 => 1.5, // Lowest band is most aggressive
         1 => 1.2,
@@ -198,19 +204,25 @@ pub fn calculate_target_gr(band_idx: usize, amount: f32, tilt: f32, envelope: f3
         _ => 1.0,
     };
 
+    // The final intensity is a combination of the main 'Amount', the 'Tilt' bias,
+    // and the inherent frequency factor of the band.
     let intensity = amount * tilt_bias * freq_factor;
 
-    // Threshold: Drops rapidly with Amount
-    let threshold_db = -10.0 - (25.0 * intensity.powf(2.0))
+    // Threshold: The compression threshold drops as intensity increases, meaning more
+    // of the signal gets compressed.
+    let threshold_db = -10.0 - (25.0 * intensity)
         - (tilt * -5.0 * ((band_idx as f32 / 4.0) - 0.5));
 
-    // Ratio: Increases non-linearly with Amount
+    // Ratio: The compression ratio increases non-linearly with 'Amount' for a more
+    // aggressive "squash" at higher settings.
     let ratio = 1.1 + (15.0 * amount.powf(2.5));
 
-    // Knee: Widens with Amount
+    // Knee: The compressor knee widens as 'Amount' increases, providing a smoother,
+    // more "musical" transition into compression at lower settings.
     let knee_db = KNEE_MAX_DB * amount.powf(1.5);
 
     // --- 2. Gain Computer (Simplified Soft-Knee) ---
+    // This is a standard gain computer formula with a soft knee.
     let input_db = util::gain_to_db(envelope);
     let gr_db = if input_db < threshold_db - (knee_db / 2.0) {
         // Below Knee (No GR)
@@ -220,14 +232,14 @@ pub fn calculate_target_gr(band_idx: usize, amount: f32, tilt: f32, envelope: f3
         (threshold_db - input_db) * (1.0 - (1.0 / ratio))
     } else {
         // Inside Knee (Soft Knee GR)
-        let knee_range = knee_db;
-        let _x = (input_db - (threshold_db - knee_range / 2.0)) / knee_range;
-        -(1.0 - 1.0 / ratio) * (input_db - (threshold_db - knee_range / 2.0)).powi(2)
-            / (2.0 * knee_range)
+        // This is a quadratic interpolation for the soft knee.
+        let knee_range = knee_db; // Use a separate variable for clarity
+        let x = input_db - (threshold_db - knee_range / 2.0);
+        -(1.0 - 1.0 / ratio) * (x * x) / (2.0 * knee_range)
     };
 
-    // GR must be non-positive
-    db_to_gain(gr_db.min(0.0))
+    // The final gain reduction factor must be non-positive (i.e., attenuation only).
+    util::db_to_gain(gr_db.min(0.0))
 }
 
 /// Calculates dynamic attack/release times in samples based on Amount and Frequency.
